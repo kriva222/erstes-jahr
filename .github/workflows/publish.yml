@@ -1,0 +1,53 @@
+name: Publish
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refuse anything unexpected, and publish only the approved files
+        run: |
+          python3 - <<'PY'
+          import base64, json, pathlib, shutil, subprocess, sys
+          allowed = """index.html styles.css manifest.webmanifest gift.enc.json
+          animals.js app.js backup.js birth.js dates.js db.js gift.js image.js sw.js theme.js zip.js
+          fonts/young-serif-latin-400-normal.woff2
+          fonts/atkinson-hyperlegible-latin-400-normal.woff2
+          fonts/atkinson-hyperlegible-latin-700-normal.woff2
+          icons/apple-touch-icon.png icons/icon-192.png icons/icon-512.png""".split()
+          repo_only = {".gitignore", ".github/workflows/publish.yml"}
+          tracked = subprocess.check_output(["git", "ls-files"], text=True).split("\n")
+          tracked = [t for t in tracked if t]
+          unexpected = sorted(set(tracked) - set(allowed) - repo_only)
+          missing = sorted(set(allowed) - set(tracked))
+          if unexpected or missing:
+              sys.exit(f"Stopped. Unexpected: {unexpected} Missing: {missing}")
+          sealed = json.load(open("gift.enc.json"))
+          if set(sealed) != {"version", "kdf", "iterations", "cipher", "salt", "iv", "data"}:
+              sys.exit("Stopped. gift.enc.json is not an encrypted file.")
+          base64.b64decode(sealed["data"], validate=True)
+          site = pathlib.Path("_site")
+          for name in allowed:
+              target = site / name
+              target.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copy(name, target)
+          PY
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
