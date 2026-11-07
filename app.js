@@ -5,6 +5,7 @@ import { createBackup, restoreBackup, BackupError } from './backup.js';
 import { ANIMALS, POLAR_FOX, faceSvg } from './animals.js';
 import * as B from './birth.js';
 import { unseal, cleanGift, WrongCode } from './gift.js';
+import * as L from './lock.js';
 
 const state = {
   tab: 'heute',
@@ -1015,6 +1016,41 @@ function backupSection() {
   );
 }
 
+const lockName = () => (isIOS() ? 'Face ID' : 'Fingerabdruck oder Gerätesperre');
+
+function lockSection() {
+  const box = el('section', { class: 'setting', hidden: true });
+  const draw = async () => {
+    const enabled = Boolean(await db.getSetting('lockCredential'));
+    if (!enabled && !(await L.isAvailable())) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    const status = el('p', { class: 'status error', role: 'status' });
+    box.replaceChildren(
+      el('h3', { class: 'section-title' }, 'App-Sperre'),
+      el('p', {}, enabled
+        ? `Die App öffnet sich nur nach ${lockName()}. Nach fünf Minuten im Hintergrund sperrt sie sich wieder.`
+        : `Schütze die App mit ${lockName()}, falls jemand anderes dein entsperrtes Handy in der Hand hat.`),
+      el('button', {
+        class: 'btn ghost wide', type: 'button',
+        onclick: async () => {
+          try {
+            await db.setSetting('lockCredential', enabled ? null : await L.enroll());
+            await draw();
+          } catch {
+            status.textContent = 'Das hat nicht geklappt. Bitte versuche es noch einmal.';
+          }
+        },
+      }, enabled ? 'Sperre ausschalten' : 'Sperre einschalten'),
+      status,
+    );
+  };
+  draw();
+  return box;
+}
+
 function themeSection() {
   let current = null;
   try { current = localStorage.getItem('year-theme'); } catch { /* storage blocked */ }
@@ -1057,6 +1093,7 @@ function openSettings() {
 
     return [
       backupSection(),
+      lockSection(),
       el('section', { class: 'setting' },
         el('div', { class: 'field' },
           el('label', { class: 'section-title', for: 'geburtsdatum' }, `${NAME}s Geburtsdatum`),
@@ -1163,9 +1200,35 @@ function showWelcome() {
         el('div', {}, el('h2', {}, 'Einmal im Monat sichern'), el('p', {}, 'Geht das Handy verloren oder wird die App gelöscht, ist alles seit der letzten Sicherung weg. Die App erinnert dich leise daran.'))),
       actions(el('button', {
         class: 'btn wide', type: 'button',
-        onclick: isStandalone() ? finish : showInstall,
+        onclick: isStandalone() ? offerLock : showInstall,
       }, isStandalone() ? 'Los geht’s' : 'Weiter')),
     );
+  };
+
+  const offerLock = async () => {
+    if (!(await L.isAvailable())) return finish();
+    window.scrollTo(0, 0);
+    const status = el('p', { class: 'status error', role: 'status' });
+    const turnOn = el('button', {
+      class: 'btn wide', type: 'button',
+      onclick: async () => {
+        status.textContent = '';
+        try {
+          await db.setSetting('lockCredential', await L.enroll());
+          await finish();
+        } catch {
+          status.textContent = 'Das hat nicht geklappt. Du kannst die Sperre später in den Einstellungen einschalten.';
+        }
+      },
+    }, `Mit ${lockName()} schützen`);
+    screen(
+      parade(),
+      el('h1', {}, 'Soll die App gesperrt sein?'),
+      el('p', {}, `Dann öffnet sie sich nur nach ${lockName()}. Dein Handy prüft das selbst, die App sieht dein Gesicht oder deinen Fingerabdruck nie.`),
+      status,
+      actions(turnOn, el('button', { class: 'btn ghost wide', type: 'button', onclick: finish }, 'Jetzt nicht')),
+    );
+    return null;
   };
 
   const showInstall = () => {
@@ -1237,6 +1300,86 @@ async function start() {
   } catch {
     showStorageProblem();
   }
+}
+
+// ---------- the app lock screen ----------
+
+const RELOCK_AFTER = 5 * 60 * 1000;
+let lockOpen = false;
+let hiddenAt = null;
+
+async function requireUnlock() {
+  const credentialId = await db.getSetting('lockCredential');
+  if (!credentialId || lockOpen) return;
+  await new Promise((resolve) => showLock(credentialId, resolve));
+}
+
+function showLock(credentialId, resolve) {
+  lockOpen = true;
+  const dialog = el('dialog', { class: 'lock-screen', 'aria-label': 'App gesperrt' });
+  const unlock = () => {
+    lockOpen = false;
+    dialog.close();
+    dialog.remove();
+    resolve();
+  };
+  dialog.addEventListener('cancel', (event) => event.preventDefault());
+
+  const status = el('p', { class: 'status error', role: 'status' });
+  const biometric = el('button', {
+    class: 'btn wide', type: 'button',
+    onclick: async () => {
+      status.textContent = '';
+      try {
+        if (await L.verify(credentialId)) unlock();
+      } catch {
+        status.textContent = `${lockName()} hat nicht geklappt. Versuche es noch einmal oder nimm deinen Code.`;
+      }
+    },
+  }, `Mit ${lockName()} öffnen`);
+
+  const codeInput = el('input', {
+    id: 'sperre-code', type: 'text', autocomplete: 'off', autocapitalize: 'characters',
+    spellcheck: false, placeholder: 'XXXX-XXXX-XXXX-XXXX',
+  });
+  const codeButton = el('button', {
+    class: 'btn ghost wide', type: 'button',
+    onclick: async () => {
+      status.textContent = '';
+      codeButton.disabled = true;
+      try {
+        const response = await fetch('gift.enc.json');
+        await unseal(await response.json(), codeInput.value);
+        codeInput.value = '';
+        unlock();
+      } catch (error) {
+        codeButton.disabled = false;
+        status.textContent = error instanceof WrongCode
+          ? 'Dieser Code passt nicht. Prüfe ihn bitte noch einmal.'
+          : 'Das hat nicht geklappt. Bitte versuche es noch einmal.';
+      }
+    },
+  }, 'Mit Code öffnen');
+  const codeArea = el('div', { class: 'stack-tight', hidden: true },
+    el('label', { class: 'field-label', for: 'sperre-code' }, 'Dein Code'), codeInput, codeButton);
+  const showCode = el('button', {
+    class: 'link', type: 'button',
+    onclick: () => {
+      codeArea.hidden = false;
+      showCode.hidden = true;
+      codeInput.focus();
+    },
+  }, 'Stattdessen den Code eingeben');
+
+  dialog.append(el('div', { class: 'lock-inner' },
+    face(POLAR_FOX, 'xl'),
+    el('h1', { class: 'page-title' }, 'Die App ist gesperrt'),
+    status,
+    biometric,
+    showCode,
+    codeArea));
+  document.body.append(dialog);
+  dialog.showModal();
 }
 
 // ---------- the code screen ----------
@@ -1316,15 +1459,22 @@ async function boot() {
     showStorageProblem();
     return;
   }
-  if (hasGift) await start();
-  else showCodeScreen();
+  if (hasGift) {
+    await requireUnlock();
+    await start();
+  } else {
+    showCodeScreen();
+  }
 
   // A phone can keep the app open for days, so check for a new day when it returns.
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') {
       pendingSaves.forEach((save) => save());
+      hiddenAt = Date.now();
       return;
     }
+    if (hiddenAt && Date.now() - hiddenAt >= RELOCK_AFTER) requireUnlock();
+    hiddenAt = null;
     const now = D.today();
     if (now === state.today) return;
     state.today = now;

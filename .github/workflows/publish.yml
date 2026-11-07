@@ -23,7 +23,7 @@ jobs:
           python3 - <<'PY'
           import base64, json, pathlib, shutil, subprocess, sys
           allowed = """index.html styles.css manifest.webmanifest gift.enc.json
-          animals.js app.js backup.js birth.js dates.js db.js gift.js image.js sw.js theme.js zip.js
+          animals.js app.js backup.js birth.js dates.js db.js gift.js image.js lock.js sw.js theme.js zip.js
           fonts/young-serif-latin-400-normal.woff2
           fonts/atkinson-hyperlegible-latin-400-normal.woff2
           fonts/atkinson-hyperlegible-latin-700-normal.woff2

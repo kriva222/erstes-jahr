@@ -195,6 +195,6 @@ export const swapAll = (entries, milestones, settings) =>
 export const clearAll = () =>
   run(['entries', 'milestones', 'photos', 'thumbs', 'settings'], 'readwrite', (tx) => {
     ['entries', 'milestones', 'photos', 'thumbs'].forEach((s) => tx.objectStore(s).clear());
-    ['firstEntryAt', 'lastChangeAt', 'lastBackupAt', 'backupSnoozedUntil', 'birthDetails'].forEach((k) =>
+    ['firstEntryAt', 'lastChangeAt', 'lastBackupAt', 'backupSnoozedUntil', 'birthDetails', 'lockCredential'].forEach((k) =>
       tx.objectStore('settings').delete(k));
   });
