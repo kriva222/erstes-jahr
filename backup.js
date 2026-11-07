@@ -1,6 +1,7 @@
 // Backup and restore. The archive is also useful without the app: photos are ordinary
 // JPEGs named by date, and notizen.txt holds every line in plain text.
 import * as db from './db.js';
+import * as D from './dates.js';
 import { ZipWriter, openZip, readFile } from './zip.js';
 import { cleanDetails, detailRows } from './birth.js';
 import { cleanGift } from './gift.js';
@@ -66,6 +67,58 @@ export async function createBackup({ gift, birthDate, birthDetails, labels, onPr
 
 export class BackupError extends Error {}
 
+// A backup is a file from outside the app, so nothing in it is trusted. Only known fields
+// of the expected kind are kept, and anything else rejects the whole file before a single
+// thing has changed. The date limits keep the calendar maths working.
+const isDate = (value) => D.isValid(value) && value >= '2000-01-01' && value <= '2100-12-31';
+const isSize = (value) => Number.isInteger(value) && value > 0 && value <= 20000;
+
+function optionalText(value, max) {
+  if (value === undefined) return '';
+  if (typeof value !== 'string') throw new Error('bad-text');
+  return value.slice(0, max);
+}
+
+function cleanFiles({ photo, thumb } = {}) {
+  if (photo === undefined && thumb === undefined) return {};
+  if (typeof photo !== 'string' || !photo.startsWith('fotos/')) throw new Error('bad-photo');
+  if (typeof thumb !== 'string' || !thumb.startsWith('vorschau/')) throw new Error('bad-photo');
+  return { photo, thumb };
+}
+
+function cleanShared(raw) {
+  if (!isDate(raw.date)) throw new Error('bad-date');
+  return {
+    date: raw.date,
+    files: cleanFiles(raw.files),
+    ...(Number.isFinite(raw.updatedAt) ? { updatedAt: raw.updatedAt } : {}),
+    ...(isSize(raw.w) && isSize(raw.h) ? { w: raw.w, h: raw.h } : {}),
+  };
+}
+
+const cleanEntry = (raw) => ({ ...cleanShared(raw), text: optionalText(raw.text, 600) });
+
+function cleanMilestone(raw) {
+  const title = optionalText(raw.title, 80);
+  if (!title || typeof raw.id !== 'string' || !raw.id || raw.id.length > 100) throw new Error('bad-milestone');
+  return { ...cleanShared(raw), id: raw.id, preset: raw.preset === true, title, note: optionalText(raw.note, 600) };
+}
+
+function cleanBackup(data) {
+  if (data.format !== FORMAT || !isDate(data.birthDate)) throw new Error('wrong-format');
+  if (!Array.isArray(data.entries) || !Array.isArray(data.milestones)) throw new Error('wrong-format');
+  const gift = cleanGift(data.gift);
+  if (gift && !isDate(gift.birthDate)) throw new Error('bad-date');
+  return {
+    birthDate: data.birthDate,
+    gift,
+    // Backups made before the Steckbrief existed leave the current details alone.
+    birthDetails: data.birthDetails ? cleanDetails(data.birthDetails) : null,
+    entries: data.entries.map(cleanEntry),
+    milestones: data.milestones.map(cleanMilestone),
+  };
+}
+
 export async function restoreBackup(file, { onProgress = () => {} } = {}) {
   let files;
   let data;
@@ -73,8 +126,7 @@ export async function restoreBackup(file, { onProgress = () => {} } = {}) {
     files = await openZip(file);
     const json = files.get('daten.json');
     if (!json) throw new Error('no-data');
-    data = JSON.parse(new TextDecoder().decode(await readFile(file, json)));
-    if (data.format !== FORMAT) throw new Error('wrong-format');
+    data = cleanBackup(JSON.parse(new TextDecoder().decode(await readFile(file, json))));
   } catch {
     throw new BackupError('Diese Datei ist keine Sicherung von „Erstes Jahr“. Bitte wähle die ZIP-Datei aus, die die App erstellt hat.');
   }
@@ -84,7 +136,7 @@ export async function restoreBackup(file, { onProgress = () => {} } = {}) {
     const out = [];
     let done = start;
     for (const record of records) {
-      const { files: paths = {}, ...rest } = record;
+      const { files: paths, ...rest } = record;
       let photoId = null;
       if (paths.photo) {
         const photoInfo = files.get(paths.photo);
@@ -92,7 +144,8 @@ export async function restoreBackup(file, { onProgress = () => {} } = {}) {
         if (!photoInfo || !thumbInfo) throw new BackupError('In der Sicherung fehlen Fotos. Es wurde nichts verändert.');
         photoId = db.uid();
         const [photo, thumb] = [await readFile(file, photoInfo), await readFile(file, thumbInfo)];
-        await db.addRawPhoto(photoId, paths.type || 'image/jpeg', photo, thumb);
+        // The app only ever stores JPEGs, whatever the file claims.
+        await db.addRawPhoto(photoId, 'image/jpeg', photo, thumb);
         added.push(photoId);
       }
       out.push({ ...rest, photoId });
@@ -108,9 +161,8 @@ export async function restoreBackup(file, { onProgress = () => {} } = {}) {
     const now = Date.now();
     await db.swapAll(entries, milestones, {
       birthDate: data.birthDate,
-      ...(cleanGift(data.gift) ? { gift: cleanGift(data.gift) } : {}),
-      // Backups made before the Steckbrief existed leave the current details alone.
-      ...(data.birthDetails ? { birthDetails: cleanDetails(data.birthDetails) } : {}),
+      ...(data.gift ? { gift: data.gift } : {}),
+      ...(data.birthDetails ? { birthDetails: data.birthDetails } : {}),
       lastBackupAt: now,
       lastChangeAt: now,
       firstEntryAt: now,

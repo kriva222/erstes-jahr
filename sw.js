@@ -3,7 +3,7 @@
 // Other apps can live on the same web address and share this cache storage, so this
 // worker only ever touches caches carrying its own prefix.
 const PREFIX = 'erstes-jahr-';
-const VERSION = `${PREFIX}4`;
+const VERSION = `${PREFIX}5`;
 const FILES = [
   './',
   'animals.js', 'app.js', 'backup.js', 'birth.js', 'dates.js', 'db.js', 'gift.js', 'image.js', 'lock.js', 'theme.js', 'zip.js',
